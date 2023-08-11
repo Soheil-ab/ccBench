@@ -1,0 +1,130 @@
+schemes:
+  sage:
+    name: Sage
+    color: blue
+    marker: '*'
+  tcpdatagen:
+    name: GEN
+    color: red
+    marker: '*'
+  genet:
+    name: Genet
+    color: red
+    marker: '-'
+  aurora:
+    name: Aurora
+    color: brown
+    marker: '8'
+  cubic:
+    name: TCP Cubic
+    color: black
+    marker: '*'
+  orca:
+    name: Orca
+    color: red
+    marker: '*'
+  dcubic:
+    name: DeepCubic
+    color: blue
+    marker: '*'
+  c2tcp:
+    name: C2TCP
+    color: green
+    marker: '*'
+  dillinois:
+    name: DeepIllinois
+    color: blue
+    marker: 'x'
+  illinois:
+    name: TCP Illinois
+    color: silver
+    marker: 'x'
+  dwestwood:
+    name: DeepWestwood
+    color: blue
+    marker: 'o'
+  westwood:
+    name: TCP Westwood
+    color: black
+    marker: 'o'
+  vegas:
+    name: TCP Vegas
+    color: silver
+    marker: 'h'
+  dbbr:
+    name: DeepBBR
+    color: blue
+    marker: '^'
+  bbr:
+    name: TCP BBR
+    color: gold
+    marker: '^'
+  bbr2:
+    name: TCP BBRv2
+    color: orange
+    marker: '+'
+  ledbat:
+    name: LEDBAT
+    color: green
+    marker: '<'
+  pcc:
+    name: PCC-Allegro
+    color: cyan
+    marker: '>'
+  verus:
+    name: Verus
+    color: skyblue
+    marker: 'H'
+  sprout:
+    name: Sprout
+    color: orange
+    marker: 'p'
+#  quic:
+#    name: QUIC Cubic
+#    color: magenta
+#    marker: '8'
+#  scream:
+#    name: SCReAM
+#    color: pink
+#    marker: '1'
+  webrtc:
+    name: WebRTC media
+    color: brown
+    marker: 'v'
+  copa:
+    name: Copa
+    color: red
+    marker: 'o'
+  taova:
+    name: TaoVA-100x
+    color: gray
+    marker: 'd'
+  vivace:
+    name: PCC-Vivace
+    color: blue
+    marker: '<'
+  indigo:
+    name: Indigo
+    color: indigo
+    marker: 'D'
+  reno:
+    name: NewReno
+    color: chartreuse
+    marker: '<'
+  highspeed:
+    name: HighSpeed
+    color: aquamarine
+    marker: '<'
+  yeah:
+    name: YeAH
+    color: antiquewhite
+    marker: '<'
+  htcp:
+    name: HTCP
+    color: aliceblue
+    marker: '<'
+  deepcc:
+    name: DeepCC
+    color: coral 
+    marker: '<'
+

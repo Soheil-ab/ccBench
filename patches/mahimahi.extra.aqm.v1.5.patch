@@ -1,0 +1,634 @@
+diff -rpuN mahimahi-org/src/frontend/link_queue.cc mahimahi/src/frontend/link_queue.cc
+--- mahimahi-org/src/frontend/link_queue.cc	2018-10-06 00:23:48.351097300 -0400
++++ mahimahi/src/frontend/link_queue.cc	2019-05-25 16:46:24.112054100 -0400
+@@ -79,6 +79,9 @@ LinkQueue::LinkQueue( const string & lin
+         if ( prefix ) {
+             *log_ << "# mahimahi config: " << prefix << endl;
+         }
++        std::unique_ptr<std::ofstream> log__;
++        log__.reset(new ofstream("basetime"));
++        *log__ << initial_timestamp()+base_timestamp_ << endl;
+     }
+ 
+     /* create graphs if called for */
+@@ -134,7 +137,7 @@ void LinkQueue::record_departure( const
+     /* log the delivery */
+     if ( log_ ) {
+         *log_ << departure_time << " - " << packet.contents.size()
+-              << " " << departure_time - packet.arrival_time << endl;
++              << " " << departure_time - packet.arrival_time << " " << packet.queue_num<<endl;
+     }
+ 
+     /* meter the delivery */
+diff -rpuN mahimahi-org/src/frontend/linkshell.cc mahimahi/src/frontend/linkshell.cc
+--- mahimahi-org/src/frontend/linkshell.cc	2018-10-06 00:23:48.365166700 -0400
++++ mahimahi/src/frontend/linkshell.cc	2019-05-25 18:18:36.558650600 -0400
+@@ -6,8 +6,11 @@
+ #include "drop_tail_packet_queue.hh"
+ #include "drop_head_packet_queue.hh"
+ #include "codel_packet_queue.hh"
++#include "multi_packet_queue.hh"
++#include "bode_packet_queue.hh"
+ #include "pie_packet_queue.hh"
+ #include "link_queue.hh"
++
+ #include "packetshell.cc"
+ 
+ using namespace std;
+@@ -24,7 +27,7 @@ void usage_error( const string & program
+     cerr << "          --uplink-queue=QUEUE_TYPE --downlink-queue=QUEUE_TYPE" << endl;
+     cerr << "          --uplink-queue-args=QUEUE_ARGS --downlink-queue-args=QUEUE_ARGS" << endl;
+     cerr << endl;
+-    cerr << "          QUEUE_TYPE = infinite | droptail | drophead | codel | pie" << endl;
++    cerr << "          QUEUE_TYPE = infinite | droptail | drophead | codel | pie | bode | multi" << endl;
+     cerr << "          QUEUE_ARGS = \"NAME=NUMBER[, NAME2=NUMBER2, ...]\"" << endl;
+     cerr << "              (with NAME = bytes | packets | target | interval | qdelay_ref | max_burst)" << endl;
+     cerr << "                  target, interval, qdelay_ref, max_burst are in milli-second" << endl << endl;
+@@ -42,6 +45,10 @@ unique_ptr<AbstractPacketQueue> get_pack
+         return unique_ptr<AbstractPacketQueue>( new DropHeadPacketQueue( args ) );
+     } else if ( type == "codel" ) {
+         return unique_ptr<AbstractPacketQueue>( new CODELPacketQueue( args ) );
++    } else if ( type == "multi" ) {
++        return unique_ptr<AbstractPacketQueue>( new MultiPacketQueue( args ) );
++    } else if ( type == "bode" ) {
++        return unique_ptr<AbstractPacketQueue>( new BoDePacketQueue( args ) );
+     } else if ( type == "pie" ) {
+         return unique_ptr<AbstractPacketQueue>( new PIEPacketQueue( args ) );
+     } else {
+diff -rpuN mahimahi-org/src/packet/bode_packet_queue.cc mahimahi/src/packet/bode_packet_queue.cc
+--- mahimahi-org/src/packet/bode_packet_queue.cc	1969-12-31 19:00:00.000000000 -0500
++++ mahimahi/src/packet/bode_packet_queue.cc	2019-05-26 17:57:31.724065800 -0400
+@@ -0,0 +1,83 @@
++#include "bode_packet_queue.hh"
++
++#include <math.h>
++#include "timestamp.hh"
++
++#define DISABLE_BODE_CODE 999
++
++
++BoDePacketQueue::BoDePacketQueue( const string & args )
++  : DroppingPacketQueue(args),
++    target_ ( get_arg( args, "target") ),
++	min_thr_ ( get_arg( args, "min_thr") ),
++	first_above_time_ ( 0 ),
++	drop_next_( 0 ),
++	count_ ( 0 ),
++	lastcount_ ( 0 ),
++	dropping_ ( 0 )
++{
++  if ( target_ == 0 /*|| min_thr_ == 0*/ ) {
++    throw runtime_error( "BoDe queue must have target and min_thr (packets) arguments." );
++  }
++}
++
++void BoDePacketQueue::Init(const std::string & args)
++{
++	DroppingPacketQueue::Init(args);
++	target_=get_arg( args, "target" );
++	min_thr_=get_arg( args, "min_thr" );
++	cerr<<"target_:"<<target_<<"min_thr_:"<<min_thr_<<"\n";
++}
++
++
++//NOTE: BoDe makes drop decisions at dequeue
++//However, this function cannot return NULL. Therefore we ignore
++//the drop decision if the current packet is the only one in the queue.
++//We know that if this function is called, there is at least one packet in the queue.
++dodequeue_result BoDePacketQueue::dodequeue ( uint64_t now )
++{
++  uint64_t sojourn_time;
++
++  dodequeue_result r;
++  r.p = std::move( DroppingPacketQueue::dequeue () );
++  r.ok_to_drop = false;
++
++  if ( empty() ) {
++    first_above_time_ = 0;
++    return r;
++  }
++
++  sojourn_time = now - r.p.arrival_time;
++  if ( sojourn_time <= target_ || (min_thr_!=DISABLE_BODE_CODE && size_packets()<=min_thr_) || size_bytes() <= PACKET_SIZE ) {
++	  r.ok_to_drop = false;
++  }
++  else {
++      r.ok_to_drop = true;
++  }
++  return r;
++}
++
++QueuedPacket BoDePacketQueue::dequeue( void )
++{   
++  const uint64_t now = timestamp();
++  dodequeue_result r = std::move( dodequeue ( now ) );
++
++  while ( r.ok_to_drop ) {
++      r = std::move(dodequeue(now));
++      if ( ! r.ok_to_drop ) {
++    	  dropping_ = false;
++      }
++  }
++  return r.p;
++}
++
++void BoDePacketQueue::enqueue( QueuedPacket && p )
++{
++
++  if ( good_with( size_bytes() + p.contents.size(),
++		  size_packets() + 1 ) ) {
++    accept( std::move( p ) );
++  }
++
++  assert( good() );
++}
+diff -rpuN mahimahi-org/src/packet/bode_packet_queue.hh mahimahi/src/packet/bode_packet_queue.hh
+--- mahimahi-org/src/packet/bode_packet_queue.hh	1969-12-31 19:00:00.000000000 -0500
++++ mahimahi/src/packet/bode_packet_queue.hh	2019-05-25 19:50:10.485141200 -0400
+@@ -0,0 +1,43 @@
++/* -*-mode:c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++#ifndef BODE_PACKET_QUEUE_HH
++#define BODE_PACKET_QUEUE_HH
++
++#include <random>
++#include <string>
++#include "dropping_packet_queue.hh"
++#include "codel_packet_queue.hh"
++
++using namespace std;
++
++class BoDePacketQueue : public DroppingPacketQueue
++{
++private:
++    const static unsigned int PACKET_SIZE = 1504;
++    //Configuration parameters
++    uint32_t target_, min_thr_;
++
++    //State variables
++    uint64_t first_above_time_, drop_next_;
++    uint32_t count_, lastcount_;
++    bool dropping_;
++
++    virtual const std::string & type( void ) const override
++    {
++        static const std::string type_ { "bode" };
++        return type_;
++    }
++
++    dodequeue_result dodequeue ( uint64_t now );
++
++public:
++
++    BoDePacketQueue( const std::string & args );
++    void Init(const std::string & args) override;
++
++    void enqueue( QueuedPacket && p ) override;
++    QueuedPacket dequeue( void ) override;
++
++};
++
++#endif /* BODE_PACKET_QUEUE_HH */
+diff -rpuN mahimahi-org/src/packet/dropping_packet_queue.cc mahimahi/src/packet/dropping_packet_queue.cc
+--- mahimahi-org/src/packet/dropping_packet_queue.cc	2018-10-06 00:23:48.800024700 -0400
++++ mahimahi/src/packet/dropping_packet_queue.cc	2019-05-26 18:15:30.944845500 -0400
+@@ -17,6 +17,17 @@ DroppingPacketQueue::DroppingPacketQueue
+     }
+ }
+ 
++void DroppingPacketQueue::Init(const std::string & args)
++{
++	unsigned int pkt=get_arg( args, "packets" );
++	unsigned int bytes=get_arg( args, "bytes" );
++	if(pkt)
++		packet_limit_=pkt;
++	else
++		byte_limit_=bytes;
++	cerr<<"packet_limit_:"<<packet_limit_<<"\n";
++}
++
+ QueuedPacket DroppingPacketQueue::dequeue( void )
+ {
+     assert( not internal_queue_.empty() );
+diff -rpuN mahimahi-org/src/packet/dropping_packet_queue.hh mahimahi/src/packet/dropping_packet_queue.hh
+--- mahimahi-org/src/packet/dropping_packet_queue.hh	2018-10-06 00:23:48.809999300 -0400
++++ mahimahi/src/packet/dropping_packet_queue.hh	2019-05-26 18:15:34.956931500 -0400
+@@ -11,6 +11,7 @@
+ 
+ class DroppingPacketQueue : public AbstractPacketQueue
+ {
++
+ private:
+     int queue_size_in_bytes_ = 0, queue_size_in_packets_ = 0;
+ 
+@@ -19,8 +20,8 @@ private:
+     virtual const std::string & type( void ) const = 0;
+ 
+ protected:
+-    const unsigned int packet_limit_;
+-    const unsigned int byte_limit_;
++    unsigned int packet_limit_;
++    unsigned int byte_limit_;
+ 
+     unsigned int size_bytes( void ) const;
+     unsigned int size_packets( void ) const;
+@@ -35,6 +36,7 @@ protected:
+ 
+ public:
+     DroppingPacketQueue( const std::string & args );
++    virtual void Init(const std::string & args);
+ 
+     virtual void enqueue( QueuedPacket && p ) = 0;
+ 
+diff -rpuN mahimahi-org/src/packet/header.hh mahimahi/src/packet/header.hh
+--- mahimahi-org/src/packet/header.hh	1969-12-31 19:00:00.000000000 -0500
++++ mahimahi/src/packet/header.hh	2019-05-25 17:37:34.108699800 -0400
+@@ -0,0 +1,82 @@
++/* -*-mode:c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++#ifndef HEADER_HH
++#define HEADER_HH
++
++using namespace std;
++
++#include <arpa/inet.h>
++//Parsing TCP/IP Header
++typedef uint32_t addr_t;
++typedef uint16_t port_t;
++
++typedef struct {
++  uint8_t  ver_ihl;  // 4 bits version and 4 bits internet header length
++  uint8_t  tos;
++  uint16_t total_length;
++  uint16_t id;
++  uint16_t flags_fo; // 3 bits flags and 13 bits fragment-offset
++  uint8_t  ttl;
++  uint8_t  protocol;
++  uint16_t checksum;
++  addr_t   src_addr;
++  addr_t   dst_addr;
++}__attribute__((packed)) ip_header_t ;
++
++enum IPHR_INDEX{
++	ver_ihl=0,
++	tos=1,
++	total_length=2,
++	id=4,
++	flags_fo=6,
++	ttl=8,
++	protocol=9,
++	checksum=10,
++	src_addr=12,
++	dst_addr=16,
++};
++enum TCPHR_INDEX{
++	src_port=20,
++	dst_port=22,
++	seq=24,
++	ack=28,
++};
++
++typedef struct{
++  uint16_t src_port;
++  uint16_t dst_port;
++  uint32_t seq;
++  uint32_t ack;
++  uint8_t  data_offset;  // 4 bits
++  uint8_t  flags;
++  uint16_t window_size;
++  uint16_t checksum;
++  uint16_t urgent_p;
++}__attribute__((packed)) tcp_header_t ;
++
++typedef struct {
++//	uint8_t pad[4];
++	  //IP
++	  uint8_t  ver_ihl;  // 4 bits version and 4 bits internet header length
++	  uint8_t  tos;
++	  uint16_t total_length;
++	  uint16_t id;
++	  uint16_t flags_fo; // 3 bits flags and 13 bits fragment-offset
++	  uint8_t  ttl;
++	  uint8_t  protocol;
++	  uint16_t checksum;
++	  addr_t   src_addr;
++	  addr_t   dst_addr;
++	  //TCP (~UDP we use only src_port/dst_port which are at similar position for both TCP and UDP)
++	  uint16_t src_port;
++	  uint16_t dst_port;
++	  uint32_t seq;
++	  uint32_t ack;
++	  uint8_t  data_offset;  // 4 bits
++	  uint8_t  flags;
++	  uint16_t window_size;
++	  uint16_t tcp_checksum;
++	  uint16_t urgent_p;
++}__attribute__((packed)) ip_tcp_header_t ;
++
++#endif /* HEADER_HH */
+diff -rpuN mahimahi-org/src/packet/Makefile.am mahimahi/src/packet/Makefile.am
+--- mahimahi-org/src/packet/Makefile.am	2018-10-06 00:23:48.744307400 -0400
++++ mahimahi/src/packet/Makefile.am	2019-05-25 17:37:00.008070200 -0400
+@@ -7,5 +7,8 @@ libpacket_a_SOURCES = packetshell.hh pac
+                       abstract_packet_queue.hh dropping_packet_queue.hh dropping_packet_queue.cc infinite_packet_queue.hh \
+                       drop_tail_packet_queue.hh drop_head_packet_queue.hh \
+                       codel_packet_queue.cc codel_packet_queue.hh \
++                      bode_packet_queue.cc bode_packet_queue.hh \
++                      multi_packet_queue.cc multi_packet_queue.hh \
+                       pie_packet_queue.cc pie_packet_queue.hh \
+-                      bindworkaround.hh
++                      bindworkaround.hh \
++                      header.hh
+diff -rpuN mahimahi-org/src/packet/multi_packet_queue.cc mahimahi/src/packet/multi_packet_queue.cc
+--- mahimahi-org/src/packet/multi_packet_queue.cc	1969-12-31 19:00:00.000000000 -0500
++++ mahimahi/src/packet/multi_packet_queue.cc	2019-05-26 18:32:35.385015500 -0400
+@@ -0,0 +1,193 @@
++#include "multi_packet_queue.hh"
++
++#include <math.h>
++#include "timestamp.hh"
++
++#include <stdio.h>
++#include <sstream>
++
++#define DISABLE_BODE_CODE 999
++
++MultiPacketQueue::MultiPacketQueue( const string & args )
++  : DroppingPacketQueue(args),
++	log__(),
++	h_queue_type(get_arg(args,"type")),
++	fifo1(DropTailPacketQueue(args)),
++	fifo2(DropTailPacketQueue(args)),
++	fifo3(DropTailPacketQueue(args)),
++	bode2(BoDePacketQueue(args)),
++	bode3(BoDePacketQueue(args))
++{
++	log__.reset(new ofstream("header_test"));
++
++	std::ostringstream oss;
++	oss << "packets=" << get_arg(args,"packets");
++	const std::string fifo1_args = oss.str();
++	fifo1.Init(fifo1_args);
++	cerr<<"FIFO1\n";
++
++	oss.clear();
++	oss.str("");
++	oss << "packets=" << get_arg(args,"packets2");
++	const std::string fifo2_args = oss.str();
++	fifo2.Init(fifo2_args);
++	cerr<<"FIFO2\n";
++
++	oss.clear();
++	oss.str("");
++	oss << "packets=" << get_arg(args,"packets3");
++	const std::string fifo3_args = oss.str();
++	fifo3.Init(fifo3_args);
++	cerr<<"FIFO3\n";
++
++	oss.clear();
++	oss.str("");
++	oss << "packets=" << get_arg(args,"packets2")<<",target="<<get_arg(args,"target")<<",min_thr="<<get_arg(args,"min_thr");
++	const std::string bode2_args = oss.str();
++	bode2.Init(bode2_args);
++	cerr<<"BODE2\n";
++
++	oss.clear();
++	oss.str("");
++	oss << "packets=" << get_arg(args,"packets3")<<",target="<<get_arg(args,"target3")<<",min_thr="<<get_arg(args,"min_thr3");
++	const std::string bode3_args = oss.str();
++	bode3.Init(bode3_args);
++	cerr<<"BODE3\n";
++
++//	bode2=new BoDePacketQueue(args);
++//	fifo1=new DropTailPacketQueue(args);
++}
++
++bool MultiPacketQueue::empty( void ) const
++{
++    return (bode3.empty() && bode2.empty() && fifo1.empty() && fifo2.empty() && fifo3.empty());
++}
++
++QueuedPacket MultiPacketQueue::dequeue( void )
++{   
++	QueuedPacket r("",0);
++	AbstractPacketQueue *hq3=&bode3;
++	AbstractPacketQueue *hq2=&bode2;
++	if (h_queue_type==hq_fifo)
++	{
++		hq3=&fifo3;
++		hq2=&fifo2;
++	}
++	if(!hq3->empty())
++	{
++		r=std::move(hq3->dequeue());
++	}
++	else if(!hq2->empty())
++	{
++		r=std::move(hq2->dequeue());
++	}
++	else
++	{
++		r=std::move(fifo1.dequeue());
++	}
++	return r;
++}
++
++void MultiPacketQueue::enqueue( QueuedPacket && p )
++{
++  string contents=p.contents;
++  ip_tcp_header_t *hd;
++  bool done=false;
++  //Highest priority port==5050
++  AbstractPacketQueue *hq3=&bode3;
++  AbstractPacketQueue *hq2=&bode2;
++  if (h_queue_type==hq_fifo)
++  {
++	  hq3=&fifo3;
++	  hq2=&fifo2;
++  }
++  for(size_t i=0;i<contents.size();++i)
++  {
++	  hd =  (ip_tcp_header_t*)(contents.c_str()+i);
++	  if (hd->ver_ihl==0x45)
++	  {
++		  done=true;
++		  break;
++	  }
++  }
++  if(!done)
++  {
++	  hd =  (ip_tcp_header_t*)(contents.c_str());
++  }
++
++  	if(GetSrcPort(hd)==5100)
++	{
++		p.queue_num=3;
++		hq3->enqueue(std::move(p));
++	}
++	else if(GetSrcPort(hd)==5050)
++	{
++		p.queue_num=2;
++		hq2->enqueue(std::move(p));
++	}
++	else
++	{
++		fifo1.enqueue(std::move(p));
++	}
++}
++port_t MultiPacketQueue::GetSrcPort(ip_tcp_header_t *ip_tcp_header)
++{
++	return ntohs(ip_tcp_header->src_port);
++}
++
++void MultiPacketQueue::ParseHD(ip_tcp_header_t *ip_tcp_header){
++//    	return;
++	ip_tcp_header->src_port		= ntohs(ip_tcp_header->src_port);
++	ip_tcp_header->dst_port     = ntohs(ip_tcp_header->dst_port);
++
++/*
++	ip_tcp_header->total_length = ntohs(ip_tcp_header->total_length);
++	ip_tcp_header->id           = ntohs(ip_tcp_header->id);
++	ip_tcp_header->flags_fo     = ntohs(ip_tcp_header->flags_fo);
++	ip_tcp_header->checksum     = ntohs(ip_tcp_header->checksum);
++	ip_tcp_header->src_addr     = ntohl(ip_tcp_header->src_addr);
++	ip_tcp_header->dst_addr     = ntohl(ip_tcp_header->dst_addr);
++
++	ip_tcp_header->src_port		= ntohs(ip_tcp_header->src_port);
++	ip_tcp_header->dst_port     = ntohs(ip_tcp_header->dst_port);
++	ip_tcp_header->seq		    = ntohl(ip_tcp_header->seq);
++	ip_tcp_header->ack     	 	= ntohl(ip_tcp_header->ack);
++//    	ip_tcp_header->data_offset  = ntohl(ip_tcp_header->data_offset);
++//    	ip_tcp_header->flags   	 	= ntohl(ip_tcp_header->flags);
++	ip_tcp_header->window_size  = ntohs(ip_tcp_header->window_size);
++	ip_tcp_header->tcp_checksum	 	= ntohs(ip_tcp_header->tcp_checksum);
++	ip_tcp_header->urgent_p     = ntohs(ip_tcp_header->urgent_p);
++*/
++
++//    	return ip_tcp_header;
++}
++
++ip_header_t* MultiPacketQueue::ParseIP(const std::string contents)
++{
++	ip_header_t* ip_header =  (ip_header_t*)(contents.c_str());
++	ip_header->total_length = ntohs(ip_header->total_length);
++	ip_header->id           = ntohs(ip_header->id);
++	ip_header->flags_fo     = ntohs(ip_header->flags_fo);
++	ip_header->checksum     = ntohs(ip_header->checksum);
++	ip_header->src_addr     = ntohl(ip_header->src_addr);
++	ip_header->dst_addr     = ntohl(ip_header->dst_addr);
++	return ip_header;
++}
++
++tcp_header_t* MultiPacketQueue::ParseTCP(const std::string contents)
++{
++//    	ip_header_t* ip_header=ParseIP(contents);
++
++	unsigned int ip_size = 20;//4 * (ip_header->ver_ihl & 0x0F);
++	tcp_header_t* tcp_header =  (tcp_header_t*)(contents.c_str()+ip_size);
++	tcp_header->src_port	 = ntohs(tcp_header->src_port);
++	tcp_header->dst_port     = ntohs(tcp_header->dst_port);
++	tcp_header->seq		     = ntohs(tcp_header->seq);
++	tcp_header->ack     	 = ntohs(tcp_header->ack);
++	tcp_header->data_offset  = ntohl(tcp_header->data_offset);
++	tcp_header->flags   	 = ntohl(tcp_header->flags);
++	tcp_header->window_size  = ntohl(tcp_header->window_size);
++	tcp_header->checksum	 = ntohl(tcp_header->checksum);
++	tcp_header->urgent_p     = ntohl(tcp_header->urgent_p);
++	return tcp_header;
++}
+diff -rpuN mahimahi-org/src/packet/multi_packet_queue.hh mahimahi/src/packet/multi_packet_queue.hh
+--- mahimahi-org/src/packet/multi_packet_queue.hh	1969-12-31 19:00:00.000000000 -0500
++++ mahimahi/src/packet/multi_packet_queue.hh	2019-05-26 18:15:46.332985800 -0400
+@@ -0,0 +1,65 @@
++/* -*-mode:c++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++
++#ifndef MULTI_PACKET_QUEUE_HH
++#define MULTI_PACKET_QUEUE_HH
++
++#include <random>
++#include <memory>
++#include <iostream>
++#include <cstdint>
++#include <string>
++#include <fstream>
++#include "dropping_packet_queue.hh"
++#include "codel_packet_queue.hh"
++#include "drop_tail_packet_queue.hh"
++#include "bode_packet_queue.hh"
++#include "header.hh"
++
++using namespace std;
++enum queue_type {
++	hq_fifo=0,
++	hq_bode=1,
++};
++struct dequeue_result {
++    QueuedPacket p;
++    dequeue_result ( ): p ( "", 0 )
++    {}
++};
++
++
++class MultiPacketQueue : public DroppingPacketQueue
++{
++private:
++    const static unsigned int PACKET_SIZE = 1504;
++
++    virtual const std::string & type( void ) const override
++    {
++        static const std::string type_ { "multi" };
++        return type_;
++    }
++public:
++    unique_ptr<std::ofstream> log__;
++    //Type of higher priority queues!
++    int h_queue_type;
++    DropTailPacketQueue fifo1;
++    DropTailPacketQueue fifo2;
++    DropTailPacketQueue fifo3;
++    BoDePacketQueue bode2;
++    BoDePacketQueue bode3;
++
++    MultiPacketQueue( const std::string & args );
++
++    void enqueue( QueuedPacket && p ) override;
++    QueuedPacket dequeue( void ) override;
++
++    bool empty( void ) const override;
++
++    void ParseHD(ip_tcp_header_t *ip_tcp_header);
++    port_t GetSrcPort(ip_tcp_header_t *ip_tcp_header);
++
++    ip_header_t* ParseIP(const std::string contents);
++    tcp_header_t* ParseTCP(const std::string contents);
++
++};
++
++#endif /* MULTI_PACKET_QUEUE_HH */
+diff -rpuN mahimahi-org/src/packet/queued_packet.hh mahimahi/src/packet/queued_packet.hh
+--- mahimahi-org/src/packet/queued_packet.hh	2018-10-06 00:23:48.859774500 -0400
++++ mahimahi/src/packet/queued_packet.hh	2019-05-25 18:39:16.064837400 -0400
+@@ -9,10 +9,20 @@ struct QueuedPacket
+ {
+     uint64_t arrival_time;
+     std::string contents;
++    unsigned int queue_num;
++
++    QueuedPacket( const std::string & s_contents, uint64_t s_arrival_time)
++        : arrival_time( s_arrival_time ), contents( s_contents ),queue_num(1)
++    {
++
++    }
++
++    QueuedPacket( const std::string & s_contents, uint64_t s_arrival_time,unsigned int q_num)
++        : arrival_time( s_arrival_time ), contents( s_contents ),queue_num(q_num)
++    {
++
++    }
+ 
+-    QueuedPacket( const std::string & s_contents, uint64_t s_arrival_time )
+-        : arrival_time( s_arrival_time ), contents( s_contents )
+-    {}
+ };
+ 
+ #endif /* QUEUED_PACKET_HH */

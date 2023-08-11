@@ -1,0 +1,73 @@
+diff -rpuN -x '.*' mahimahi-base/src/frontend/link_queue.cc mahimahi/src/frontend/link_queue.cc
+--- mahimahi-base/src/frontend/link_queue.cc	2021-11-01 10:28:29.067685700 -0400
++++ mahimahi/src/frontend/link_queue.cc	2021-11-01 10:40:45.244841700 -0400
+@@ -79,6 +79,13 @@ LinkQueue::LinkQueue( const string & lin
+         if ( prefix ) {
+             *log_ << "# mahimahi config: " << prefix << endl;
+         }
++        /*
++         * Soheil: To sync up the Agent's perception of time and the current time on the trace
++         */
++        std::unique_ptr<std::ofstream> log__;
++        log__.reset(new ofstream(logfile+"_init_timestamp"));
++        *log__ << initial_timestamp()+base_timestamp_ << endl;
++
+     }
+ 
+     /* create graphs if called for */
+diff -rpuN -x '.*' mahimahi-base/src/util/dns_server.cc mahimahi/src/util/dns_server.cc
+--- mahimahi-base/src/util/dns_server.cc	2021-11-01 10:28:29.577406100 -0400
++++ mahimahi/src/util/dns_server.cc	2021-11-01 11:13:23.481448300 -0400
+@@ -30,7 +30,7 @@ ChildProcess start_dnsmasq( const vector
+ 
+     unsigned int attempts = 0;
+     while ( true ) {
+-        if ( ++attempts >= 20 ) {
++        if ( ++attempts >= 200 ) {
+             throw runtime_error( "dnsmasq: did not start after " + to_string( attempts ) + " attempts" );
+         }
+ 
+diff -rpuN -x '.*' mahimahi-base/src/util/netdevice.cc mahimahi/src/util/netdevice.cc
+--- mahimahi-base/src/util/netdevice.cc	2021-11-01 10:28:29.672811500 -0400
++++ mahimahi/src/util/netdevice.cc	2021-11-01 11:36:58.667202400 -0400
+@@ -27,6 +27,12 @@ TunDevice::TunDevice( const string & nam
+                      [] ( ifreq &ifr ) { ifr.ifr_flags = IFF_TUN; } );
+ 
+     assign_address( name, addr, peer );
++	/*
++	 * Soheil: Bug! The default value of txqueuelen (500) is very low!
++	 * With the default setting we can only reach upto 300Mbps for a 20ms RTT (75Mbps for a 80ms and so on).
++	 * For a 1Gbps mRTT=200ms link ==> we need at least BDP = 16,666pkt ==> We set txqueuelen=20,000
++	 */
++    run( { IP, "link", "set", "dev", name, "txqueuelen",TXQUEUELEN} );
+ }
+ 
+ void interface_ioctl( FileDescriptor & fd, const unsigned long request,
+@@ -88,7 +94,13 @@ VirtualEthernetPair::VirtualEthernetPair
+     name_check( outside_name );
+     name_check( inside_name );
+ 
+-    run( { IP, "link", "add", outside_name, "type", "veth", "peer", "name", inside_name } );
++//    run( { IP, "link", "add", outside_name, "type", "veth", "peer", "name", inside_name } );
++	/*
++	 * Soheil: Bug! The default value of txqueuelen (500) is very low!
++	 * With the default setting we can only reach upto 300Mbps for a 20ms RTT (75Mbps for a 80ms and so on).
++	 * For a 1Gbps mRTT=200ms link ==> we need at least BDP = 16,666pkt ==> We set txqueuelen=20,000
++	 */
++	run( { IP, "link", "add", outside_name, "txqueuelen",TXQUEUELEN, "type", "veth", "peer", "name", inside_name } );
+ }
+ 
+ VirtualEthernetPair::~VirtualEthernetPair()
+diff -rpuN -x '.*' mahimahi-base/src/util/netdevice.hh mahimahi/src/util/netdevice.hh
+--- mahimahi-base/src/util/netdevice.hh	2021-11-01 10:28:29.675803100 -0400
++++ mahimahi/src/util/netdevice.hh	2021-11-01 10:42:23.072451800 -0400
+@@ -12,6 +12,9 @@
+ #include "file_descriptor.hh"
+ #include "address.hh"
+ 
++/*Soheil: For a 1Gbps mRTT=200ms link ==> we need at least BDP = 16,666pkt ==> We set txqueuelen=20,000*/
++#define TXQUEUELEN "400000"
++
+ /* general helpers */
+ void interface_ioctl( FileDescriptor & fd, const unsigned long request,
+                       const std::string & name,

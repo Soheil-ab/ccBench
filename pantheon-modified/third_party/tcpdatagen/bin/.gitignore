@@ -1,0 +1,9 @@
+*max-cwnd*
+*cwnd-max*
+train_dir-*/*
+log/*
+3*
+
+!log/.gitkeep 
+!train_dir-*/.gitkeep 
+
